@@ -1,0 +1,737 @@
+##############################################
+### Data Frame from Scratch ##################
+##############################################
+
+remove(list=ls())
+
+setwd("C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/R Code")
+
+library(plm)
+library(reshape)
+library(rgdal)
+library(sp)
+library(stats)
+library(raster)
+library(rgeos)
+
+#####################################
+#### CHRIPS Data Download ###########
+#####################################
+#
+#
+#setwd("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data")
+#
+# source: https://data.chc.ucsb.edu/products/CHIRPS-2.0/global_monthly/tifs/
+#
+#months <- c("01","02","03","04","05","06",
+#            "07","08","09","10","11","12")
+#
+#years <- 2006:2019 #in order to establish baseline
+#
+#  https://data.chc.ucsb.edu/products/CHIRPS-2.0/global_monthly/tifs/chirps-v2.0.2016.01.tif.gz
+#
+#
+#for(i in 1:length(years)){
+#  #i <- 1
+#  
+#  for(j in 1:length(months)){
+#    #j <- 1
+#    
+#    path <- paste0("https://data.chc.ucsb.edu/products/CHIRPS-2.0/global_monthly/tifs/chirps-v2.0.",years[i],".",months[j],".tif.gz")
+#    file_name <- paste0(years[i],"_",months[j],"CHIRPS_file.zip")
+#    
+#    download.file(path, file_name)
+#    
+#    #unzip(file_name)
+#    
+#  }
+#  
+#}
+#
+#couldn't get it to unzip on its own... done manually in folder
+
+####################### 
+### ALCED Data Work ###
+#######################
+
+#
+#acled_data <- read.csv(file = "C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\ACLED Data\\ACLED South Asia 4 APR 2020 download.csv",
+#                       header=TRUE)
+#
+#setwd("C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/ACLED Data")
+#
+#save(acled_data,file="acled_data.RData")
+#
+#load(file="C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\ACLED Data\\acled_data.RData")
+#acled_india <- acled_data[acled_data$country=="India",]
+#setwd("C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/ACLED Data")
+#acled_india <- acled_india[acled_india$year !=2020,]
+#save(acled_india,file="acled_india.RData")
+#
+#remove(acled_data)
+
+
+
+
+################
+#shapefile work#
+################
+
+india_shapefile <- readOGR(dsn="C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/India Shapefile", 
+                           layer="IND_adm1")
+projection_info <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+crs(india_shapefile) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+###################
+#creating the grid#
+###################
+
+pixelsize = .5 
+
+#India bounding box / raster template
+box = round(extent(india_shapefile) / pixelsize) * pixelsize 
+template = raster(box, crs = projection_info,
+                  nrows = (box@ymax - box@ymin) / pixelsize, 
+                  ncols = (box@xmax - box@xmin) / pixelsize)
+
+#assign cell numbers
+template_mod <-  as(template, "SpatialPolygonsDataFrame") #done in order to use extract()
+
+for(i in 1:length(template_mod)){ #assign cell #'s in order to pick which one to select below
+  template_mod$cell_number[i] <- i
+}
+
+#verify the ordering
+summary(template_mod)
+#the top left of this box is at 35.5 deg. North, 68.5 deg east
+#bottom right is 6.5 deg north, 97.5 deg east
+
+template_mod[1][1,]
+template_mod[1][3364,]
+
+
+############
+#ACLED data#
+############
+
+load(file="C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\ACLED Data\\acled_india.RData")
+coords <- acled_india[c("longitude","latitude")] 
+ACLED_pt <- SpatialPointsDataFrame(coords = coords, acled_india, proj4string = projection_info) 
+
+#field--NEEDS TO BE 1 for the rasterize function in this case since looking for 
+#spatial clusters not value clusters
+ACLED_pt$PRESENT <- 1
+
+
+#################################
+## ACLED counts by cell/year ####
+#################################
+
+years <- sort(unique(acled_india$year))
+
+cell_year_data_frame <- as.data.frame(matrix(0,nrow=0,ncol=3))
+
+
+for(i in 1:length(years)){
+  #i <- 1
+  ACLED_pt_loop <- ACLED_pt[ACLED_pt$year==years[i],]
+  data_loop <- as.data.frame(matrix(0,nrow=length(template),ncol=3))
+  data_loop[,1] <- 1:length(template)
+  data_loop[,2] <- years[i]
+  
+  rasterACLED <- rasterize(ACLED_pt_loop, template, field = 'PRESENT', fun = sum) #169 x 154 raster
+  rasterACLED[is.na(rasterACLED[])] <- 0 
+  
+  for(k in 1:length(template)){
+    data_loop[k,3] <- rasterACLED[k]
+  }
+  
+  cell_year_data_frame <- rbind(cell_year_data_frame,data_loop)
+}
+
+colnames(cell_year_data_frame) <- c("cell","year","acled_count")
+
+cell_year_data_frame$cell <- as.factor(cell_year_data_frame$cell)
+cells <- unique(cell_year_data_frame$cell)
+
+
+#######################################################
+#setting baseline rain numbers by cell/month  #########
+#######################################################
+
+baseline_years <- 2006:2015
+months <- c("01","02","03","04","05","06",
+            "07","08","09","10","11","12")
+
+
+mean_annual_rainfall <- as.data.frame(matrix(0,nrow = length(unique(cells)),ncol = length(baseline_years)+1))
+colnames(mean_annual_rainfall) <- c("cell","total_2006","total_2007","total_2008","total_2009","total_2010",
+                                  "total_2011","total_2012","total_2013","total_2014","total_2015")
+
+mean_annual_rainfall[,1] <- 1:nrow(mean_annual_rainfall)
+
+#filling in by columns
+
+for(ii in 1:length(baseline_years)){
+  #ii <- 2
+  
+  #stacking for the year
+  
+  rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                      baseline_years[ii],".",months[1],".tif")
+  brick <- raster(rain_file)
+  
+  for(i in 2:length(months)){
+    rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                        baseline_years[ii],".",months[i],".tif")
+    brick <- stack(brick,rain_file)
+    
+  }
+  
+  for(l in 1:length(months)){
+    brick[[l]][brick[[l]] < 0] <- NA #getting rid of -9999's
+    #print(l)
+  }
+  
+  #one layer: yearly total
+  brick_total <- calc(brick,sum)
+  
+  
+  for(i in 1:nrow(mean_annual_rainfall)){
+    # i <- 1
+    cell_polygon <- template_mod[template_mod$cell_number==mean_annual_rainfall[i,1],]
+    mean_annual_rainfall[i,ii+1] <- extract(brick_total,cell_polygon,fun=mean,na.rm=TRUE)
+    #print(i)
+  }
+  
+  print(baseline_years[ii])
+  
+}
+
+#save
+
+cell_year_data_frame_1 <- merge(cell_year_data_frame,mean_annual_rainfall,by="cell")
+
+save(cell_year_data_frame_1,file = "cell_year_data_frame_1.RData")
+
+######################################
+## Jay Start here ####################
+######################################
+
+#load
+
+load(file="cell_year_data_frame_1.RData")
+cells <- unique(cell_year_data_frame_1$cell)
+
+#mean months in baseline years
+
+baseline_years <- 2006:2015
+months <- c("01","02","03","04","05","06",
+            "07","08","09","10","11","12")
+
+
+mean_rainfall_by_month <- as.data.frame(matrix(0,nrow = length(unique(cells)),ncol = length(months)+1))
+colnames(mean_rainfall_by_month) <- c("cell","jan_baseline","feb_baseline","mar_baseline","apr_baseline",
+                                    "may_baseline","jun_baseline","jul_baseline","aug_baseline",
+                                    "sep_baseline","oct_baseline","nov_baseline","dec_baseline")
+
+mean_rainfall_by_month[,1] <- 1:nrow(mean_rainfall_by_month)
+
+#fill in monthly average by column
+
+for(ii in 1:length(months)){
+  #ii <- 1
+  
+  #stacking for the year
+  
+  rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                      baseline_years[1],".",months[ii],".tif")
+  brick <- raster(rain_file)
+  
+  for(i in 2:length(baseline_years)){
+    rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                        baseline_years[i],".",months[ii],".tif")
+    brick <- stack(brick,rain_file)
+    
+  }
+  
+  for(l in 1:length(baseline_years)){
+    brick[[l]][brick[[l]] < 0] <- NA #getting rid of -9999's
+    #print(l)
+  }
+  
+  #one layer: yearly total
+  brick_total <- calc(brick,mean)#note here I changed function to "mean"
+  
+  
+  for(i in 1:nrow(mean_rainfall_by_month)){
+    # i <- 1
+    cell_polygon <- template_mod[template_mod$cell_number==mean_rainfall_by_month[i,1],]
+    mean_rainfall_by_month[i,ii+1] <- extract(brick_total,cell_polygon,fun=mean,na.rm=TRUE)
+    #print(i)
+  }
+  
+  print(months[ii])
+  
+}
+
+
+#merge
+
+cell_year_data_frame_2 <- merge(cell_year_data_frame_1,mean_rainfall_by_month,by="cell")
+
+save(cell_year_data_frame_2,file = "cell_year_data_frame_2.RData")
+
+#################################
+#all months in ACLED   ##########
+#################################
+
+load(file = "cell_year_data_frame_2.RData")
+cells <- unique(cell_year_data_frame_2$cell)
+
+#mean months in baseline years
+
+acled_years <- 2016:2019
+months <- c("01","02","03","04","05","06",
+            "07","08","09","10","11","12")
+
+
+acled_rainfall_by_month <- as.data.frame(matrix(0,nrow = 0,ncol = length(months)+2))
+colnames(acled_rainfall_by_month) <- c("cell","year",
+                                      "jan_CHIRPS","feb_CHIRPS","mar_CHIRPS","apr_CHIRPS", "may_CHIRPS","jun_CHIRPS",
+                                      "jul_CHIRPS","aug_CHIRPS","sep_CHIRPS","oct_CHIRPS","nov_CHIRPS","dec_CHIRPS")
+for(ii in 1:length(acled_years)){
+  #ii <- 1
+  
+  data_frame_loop <- as.data.frame(matrix(0,nrow =length(unique(cells)),
+                                          ncol = ncol(acled_rainfall_by_month)))
+  colnames(data_frame_loop) <- colnames(acled_rainfall_by_month)
+  data_frame_loop[,1] <- 1:nrow(data_frame_loop)
+  data_frame_loop[,2] <- acled_years[ii]
+  
+  rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                      acled_years[ii],".",months[1],".tif")
+  brick <- raster(rain_file)
+  
+  for(i in 2:length(months)){
+    rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                        acled_years[ii],".",months[i],".tif")
+    brick <- stack(brick,rain_file)
+    
+  }
+  
+  for(l in 1:length(months)){
+    brick[[l]][brick[[l]] < 0] <- NA #getting rid of -9999's
+    #print(l)
+  }
+  
+  for(j in 1:nrow(data_frame_loop)){
+    #j <- 1
+    cell_polygon <- template_mod[template_mod$cell_number==data_frame_loop[j,1],]
+    
+    for(k in 1:length(months)){
+      data_frame_loop[j,k+2] <- extract(brick[[k]],cell_polygon,fun=mean,na.rm=TRUE)
+    }
+  }
+  
+  acled_rainfall_by_month <- rbind(acled_rainfall_by_month,data_frame_loop)
+  
+  
+}
+
+
+#Merge 
+cell_year_data_frame_3 <- merge(cell_year_data_frame_2,acled_rainfall_by_month,by=c("cell","year"))
+#save
+
+save(cell_year_data_frame_3,file = "cell_year_data_frame_3.RData")
+
+
+##############################
+#attach states to cells ######
+##############################
+
+
+state_cells <- as.data.frame(matrix(0,nrow = length(unique(cells)),ncol=2))
+state_cells[,1] <- 1:nrow(state_cells)
+
+for(i in 1:nrow(state_cells)){
+  #i <- 1
+  
+  cell_polygon <- template_mod[template_mod$cell_number==state_cells[i,1],]
+  cell_data <- over(cell_polygon, india_shapefile)
+  state_cells[i,2] <-  toString(cell_data$NAME_1)
+  
+}
+
+colnames(state_cells) <- c("cell","state")
+
+#merge
+
+cell_year_data_frame_4 <- merge(cell_year_data_frame_3, state_cells,by="cell")
+#save
+
+save(cell_year_data_frame_4,file = "cell_year_data_frame_4.RData")
+
+
+#save
+
+#####################################
+#normalizing acledcounts by cell ####
+#####################################
+
+load(file = "cell_year_data_frame_4.RData")
+
+  
+cell_total <- as.data.frame(tapply(cell_year_data_frame_4$acled_count, cell_year_data_frame_4$cell, sum))
+colnames(cell_total)[1] <-"cell_acled_total"
+cell_total$cell <- rownames(cell_total)
+
+cell_year_data_frame_4 <- merge(cell_year_data_frame_4,cell_total,by="cell")
+
+cell_sd <- as.data.frame(tapply(cell_year_data_frame_4$acled_count, cell_year_data_frame_4$cell, sd))
+colnames(cell_sd)[1] <-"cell_acled_sd"
+cell_sd$cell <- rownames(cell_sd)
+cell_year_data_frame_4 <- merge(cell_year_data_frame_4,cell_sd,by="cell")
+
+cell_year_data_frame_4$acled_normalized <- (cell_year_data_frame_4$acled_count - cell_year_data_frame_4$cell_acled_total/4)/
+                                            cell_year_data_frame_4$cell_acled_sd
+
+save(cell_year_data_frame_4,file = "cell_year_data_frame_4.RData")
+
+####################################
+# normalizing rainfall #############
+####################################
+
+
+cell_year_data_frame_4$year_total <- NA
+
+for(i in 1:nrow(cell_year_data_frame_4)){
+  cell_year_data_frame_4$year_total[i] <- sum(cell_year_data_frame_4[i,26:37])
+}
+
+cell_year_data_frame_4$baseline <- NA
+
+for(i in 1:nrow(cell_year_data_frame_4)){
+  cell_year_data_frame_4$baseline[i] <- sum(cell_year_data_frame_4[i,4:13])/10
+}
+
+cell_year_data_frame_4$year_total_adj <- cell_year_data_frame_4$year_total/cell_year_data_frame_4$baseline
+
+
+cell_year_data_frame_4$annual_rain_sd <- NA
+
+for(i in 1:nrow(cell_year_data_frame_4)){
+  cell_year_data_frame_4$annual_rain_sd[i] <- sd(cell_year_data_frame_4[i,4:13])
+}
+
+cell_year_data_frame_4$year_total_normal <- (cell_year_data_frame_4$year_total - cell_year_data_frame_4$baseline)/
+                                            cell_year_data_frame_4$annual_rain_sd 
+
+save(cell_year_data_frame_4,file = "cell_year_data_frame_4.RData")
+
+
+##############################################################
+#Code lifted from E. Bunting's ACLED_shot_spot_analysis.R#####
+##############################################################
+
+remove(list=ls())
+
+setwd("C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/R Code")
+
+library(shiny)
+library(rgdal)
+library(maptools)
+library(raster)
+library(ggplot2)
+library(spatstat)
+library(shapefiles)
+library(reshape2)
+library(sp)
+library(readr)
+library(dplyr)
+library(sf)
+library(rworldmap)
+library(RColorBrewer)
+library(rgeos)
+library(GISTools)
+
+
+india_shapefile <- readOGR(dsn="C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/India Shapefile", 
+                           layer="IND_adm1")
+
+load(file="C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\ACLED Data\\acled_india.RData")
+
+projection_info <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+crs(india_shapefile) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+coords <- acled_india[c("longitude","latitude")] 
+ACLED_pt <- SpatialPointsDataFrame(coords = coords, acled_india, proj4string = projection_info) 
+
+#plot(ACLED_pt, col = "red", cex = .2, pch=19,
+#     main="ACLED Incidents in India: 2016-2019")
+#plot(india_shapefile, add=TRUE)
+
+
+#pixel size
+pixelsize = .5 
+
+# bounding box / raster template
+box = round(extent(india_shapefile) / pixelsize) * pixelsize 
+template = raster(box, crs = projection_info,
+                  nrows = (box@ymax - box@ymin) / pixelsize, 
+                  ncols = (box@xmax - box@xmin) / pixelsize)
+dim(template) #[1] 58 58  1
+
+#field--NEEDS TO BE 1 for the rasterize function in this case since looking for spatial clusters not value clusters
+ACLED_pt$PRESENT <- 1
+
+heatVector <- list() 
+
+rasterACLED <- rasterize(ACLED_pt, template, field = 'PRESENT', fun = sum)
+#rasterACLED2<-log(rasterACLED)
+rasterACLED2<-rasterACLED
+kernel = focalWeight(rasterACLED2, d = .01, type = 'Gauss')
+heat = focal(rasterACLED2, kernel, fun = sum, na.rm=T)
+
+writeRaster(heat,filename="india_heat.tif",options=c('TFW=YES'), overwrite=TRUE)
+
+Allevent_polygons <- rasterToPolygons(x =heat, n=8, dissolve=TRUE)
+Allevent_polygons2<-Allevent_polygons
+Allevent_polygons_class2 <- Allevent_polygons[Allevent_polygons$layer > 0 & Allevent_polygons$layer < 2,]
+Allevent_polygons_class4 <- Allevent_polygons[Allevent_polygons$layer >= 2 & Allevent_polygons$layer < 4,]
+Allevent_polygons_class6 <- Allevent_polygons[Allevent_polygons$layer >= 4 & Allevent_polygons$layer < 6,]
+Allevent_polygons_class8 <- Allevent_polygons[Allevent_polygons$layer >= 6 & Allevent_polygons$layer < 8,]
+Allevent_polygons_classgrt8 <- Allevent_polygons[Allevent_polygons$layer >= 8,]
+
+Allevent_polygons2@data$layer <-ifelse (Allevent_polygons@data$layer >= 0 & Allevent_polygons@data$layer < 2, "2",
+                                        ifelse (Allevent_polygons@data$layer >= 2 & Allevent_polygons@data$layer < 4, "4",
+                                                ifelse(Allevent_polygons@data$layer >= 4 & Allevent_polygons@data$layer < 6, "6", 
+                                                       ifelse (Allevent_polygons@data$layer >= 6 & Allevent_polygons@data$layer < 8, "8", "9"))))
+heatVector[[1]]<-Allevent_polygons2
+raster.files<-list.files(pattern=".tif") ##why use the .tif in the pattern recognition rather than part of the name?
+raster.files
+
+raster.filesALL<-unique(raster.files) ##what does the unique function do?
+heat.raster<-lapply(raster.filesALL, raster)
+heat.raster.stack<-stack(heat.raster)
+
+
+#Figure 3: Total ACLED Incidents by Grid Cell, 2016-2019
+plot(heat.raster.stack[[1]])
+plot(india_shapefile, add=TRUE)
+
+summary(heat.raster.stack[[1]])
+
+#################################################################
+####### ACLED Events with Fatalities ############################
+#################################################################
+
+#Figure 1
+
+acled_fatalities <- acled_india[acled_india$fatalities>0,]
+sum(acled_fatalities$fatalities)
+
+coords_fatal <- acled_fatalities[c("longitude","latitude")] 
+ACLED_pt_fatal <- SpatialPointsDataFrame(coords = coords_fatal, acled_fatalities, proj4string = projection_info) 
+
+
+
+#par(mfrow=c(1,2)) 
+#Figure 1a: Total ACLED Events, 2016-2019
+plot(ACLED_pt, col = "red", cex = .2, pch=19)
+plot(india_shapefile, add=TRUE)
+
+#Figure 1b: Fatal ACLED Events: 2016-2019
+plot(ACLED_pt_fatal, col = "red", cex = .2, pch=19)
+plot(india_shapefile, add=TRUE)
+
+#par(mfrow=c(1,2)) 
+
+deaths_by_state <- as.data.frame(tapply(acled_fatalities$fatalities, acled_fatalities$admin1, sum))
+colnames(deaths_by_state) <- "ACLED_deaths"
+
+
+###################################################
+### Figure 2 ######################################
+####################################################
+
+#2019 rainfall
+months <- c("01","02","03","04","05","06",
+            "07","08","09","10","11","12")
+
+rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                    2019,".",months[1],".tif")
+brick <- raster(rain_file)
+
+for(i in 2:length(months)){
+  rain_file <- paste0("C:\\Users\\Jay\\Dropbox\\India_ACLED_CHIRPS\\CHIRPS Data\\chirps-v2.0.",
+                      2019,".",months[i],".tif")
+  brick <- stack(brick,rain_file)
+  
+}
+
+brick[[1]][brick[[1]] < 0] <- NA #getting rid of -9999's
+
+brick[[13]] <- sum(brick[[1:12]])
+
+
+
+##############################
+india_shapefile <- readOGR(dsn="C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/India Shapefile", 
+                           layer="IND_adm1")
+projection_info <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+crs(india_shapefile) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+#Figure 2: Total CHIRPS-reported Rainfall Across India in 2019 (mm)
+plot(india_shapefile)
+#xlim=c(85,87))
+plot(brick[[13]], add=TRUE,xlim=c(66,98),ylim=c(50,100))
+plot(india_shapefile, add=TRUE)
+
+
+
+#######################################################
+### Gridded Data Analysis, Regressions, etc ###########
+#######################################################
+
+remove(list=ls())
+
+setwd("C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/R Code")
+
+library(plm)
+library(reshape)
+library(rgdal)
+library(sp)
+library(stats)
+library(raster)
+library(rgeos)
+library(MASS)
+library(pglm)
+library(stargazer)
+
+load(file = "cell_year_data_frame_4.RData")
+
+#only conflict cells
+
+india_cells <- cell_year_data_frame_4[cell_year_data_frame_4$state!="NA",]
+
+india_cells <- unique(india_cells$cell)
+
+conflict_cells <- cell_year_data_frame_4[cell_year_data_frame_4$acled_count>0 & 
+                                           cell_year_data_frame_4$state!="NA",]
+
+conflict_cells <- unique(conflict_cells$cell)
+
+cell_year_data_frame_4 <- cell_year_data_frame_4[cell_year_data_frame_4$cell %in% conflict_cells,]
+
+#summary of distribution
+summary_stats <- as.data.frame(tapply(cell_year_data_frame_4$acled_count, cell_year_data_frame_4$cell, sum))
+summary_stats <- summary_stats[complete.cases(summary_stats),]
+summary(summary_stats)
+var(summary_stats)
+
+#convert to panel
+data <- pdata.frame(cell_year_data_frame_4,index = c("cell","year"))
+
+#####################################
+# negative binomial regressions #####
+#####################################
+
+attach(data)
+
+pglm_1 <- pglm(acled_count ~ year_total_normal,data= data,
+           family = negbin, model = "within", effect = "twoways")
+summary(pglm_1)
+
+data_lag <- data
+data_lag$lag_year_total_normal <- lag(data_lag$year_total_normal)
+#data_lag <- data_lag[complete.cases(data_lag),]
+
+pglm_2 <- pglm(acled_count ~ year_total_normal + lag_year_total_normal,data= data_lag,
+               family = negbin, model = "within", effect = "twoways")
+summary(pglm_2)
+
+
+########################
+#agregate contributions#
+########################
+
+cell_year_data_frame_4 <- droplevels(cell_year_data_frame_4)
+
+x <- data.frame(tapply(cell_year_data_frame_4$acled_count, cell_year_data_frame_4$cell, sum))
+colnames(x) <- "acled_total"
+x$cell <- rownames(x)
+rownames(x) <- c()
+x <- x[order(-x$acled_total),]
+x$cumulative <- NA
+total <- sum(x$acled_total)
+rownames(x) <- c()
+
+for(i in 1:nrow(x)){
+  x$cumulative[i] <- sum(x$acled_total[1:i])/total
+}
+
+#########################################
+#subset after removing outlier cells#####
+#########################################
+regular_cells <- x$cell[51:nrow(x)] #remaining: less than 260 total incidents
+
+data_subset <- data[data$cell %in% regular_cells,]
+
+data_lag_subset <- data_lag[data_lag$cell %in% regular_cells,]
+
+
+pglm_3 <- pglm(acled_count ~ year_total_normal,data= data_subset,
+               family = negbin, model = "within", effect = "twoways")
+summary(pglm_3)
+
+pglm_4 <- pglm(acled_count ~ year_total_normal + lag_year_total_normal,data= data_lag_subset,
+               family = negbin, model = "within", effect = "twoways")
+summary(pglm_4)
+
+
+#############################################################
+#### Look up individual cells ###############################
+#############################################################
+
+
+
+################
+#shapefile work#
+################
+
+india_shapefile <- readOGR(dsn="C:/Users/Jay/Dropbox/India_ACLED_CHIRPS/India Shapefile", 
+                           layer="IND_adm1")
+projection_info <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+crs(india_shapefile) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+###################
+#creating the grid#
+###################
+
+pixelsize = .5 
+
+#India bounding box / raster template
+box = round(extent(india_shapefile) / pixelsize) * pixelsize 
+template = raster(box, crs = projection_info,
+                  nrows = (box@ymax - box@ymin) / pixelsize, 
+                  ncols = (box@xmax - box@xmin) / pixelsize)
+
+#assign cell numbers
+template_mod <-  as(template, "SpatialPolygonsDataFrame") #done in order to use extract()
+
+for(i in 1:length(template_mod)){ #assign cell #'s in order to pick which one to select below
+  template_mod$cell_number[i] <- i
+}
+
+template_mod[1][129,]
+template_mod[1][772,]
+template_mod[1][303,]
+
+
+##############################################################
+#### ACLED Raw Data Analysis ################################
+##############################################################
+
+
